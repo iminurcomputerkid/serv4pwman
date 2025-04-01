@@ -14,16 +14,14 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from argon2.low_level import hash_secret_raw, Type
-from servcode.script3_sql import DatabaseConnector
 import pyotp
 import pyqrcode
 
-# Load environment variables
 load_dotenv()
 
-### DatabaseConnector (adapted from script3_sql.py)
+
 from aiohttp import ClientError
-from libsql_client import create_client  # Ensure this dependency is installed
+from libsql_client import create_client  
 
 class DatabaseConnector:
     def __init__(self):
@@ -351,7 +349,6 @@ class DatabaseConnector:
             print(f"Error deleting doc: {e}")
             raise
 
-### DynamicPasswordManager (adapted from scirpt3.py)
 class DynamicPasswordManager:
     def __init__(self, username: str):
         self.username = username
@@ -763,6 +760,6 @@ if __name__ == "__main__":
     uvicorn.run("server:app", 
     host="0.0.0.0",
     port=443,
-    ssl_keyfile="key.pem",
-    ssl_certfile="cert.pem",
+    ssl_keyfile=os.getenv("SSL_KEY_FILE", "key.pem"),
+    ssl_certfile=os.getenv("SSL_CERT_FILE", "cert.pem"),
     reload=True)
