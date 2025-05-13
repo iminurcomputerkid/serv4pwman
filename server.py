@@ -238,6 +238,17 @@ class DynamicPasswordManager:
         until = int(time.time()) + (3 * (2 ** max(0, fa-5)) * 60 if fa>=5 else 0)
         await self.db.set_lockout_data(self.username, fa, until)
 
+    async def enable_2fa(self):
+        totp_secret = pyotp.random_base32()
+        await self.db.set_totp_secret(self.username, totp_secret)
+        totp = pyotp.TOTP(totp_secret)
+        uri = totp.provisioning_uri(name=self.username, issuer_name="SecureASF")
+        return {"totp_secret": totp_secret, "provisioning_uri": uri}
+
+    async def disable_2fa(self):
+        await self.db.delete_totp_secret(self.username)
+        return {"message": "2FA disabled successfully."}
+
     def generate_secure_password(self, length=25) -> str:
         alphabet = string.ascii_letters + string.digits + string.punctuation
         return ''.join(secrets.choice(alphabet) for _ in range(length))
