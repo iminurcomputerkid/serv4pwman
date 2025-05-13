@@ -470,13 +470,22 @@ async def reset_master_password(req: ResetMasterPasswordRequest):
 async def enable_2fa(req: TwoFARequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].enable_2fa()
+    try:
+        return await sessions[req.username]["manager"].enable_2fa()
+    except Exception as e:
+        # so you get a JSON error with the real message
+        print("enable_2fa error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/disable_2fa")
 async def disable_2fa(req: TwoFARequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].disable_2fa()
+    try:
+        return await sessions[req.username]["manager"].disable_2fa()
+    except Exception as e:
+        print("disable_2fa error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/delete_all_data")
 async def delete_all_data(req: DeleteDataRequest):
