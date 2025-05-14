@@ -235,7 +235,6 @@ class DynamicPasswordManager:
         # 2) Fetch stored password hash
         stored = await self.db.get_user_password(self.username)
         if not stored:
-            # Unknown user → increment failure
             await self.inc_login_failure()
             raise HTTPException(status_code=401, detail="Invalid credentials.")
 
@@ -243,33 +242,30 @@ class DynamicPasswordManager:
         try:
             self.ph.verify(stored, master_password)
         except VerifyMismatchError:
-            # Wrong password → increment and possibly require PIN
-            await self.inc_login_failure()
-            updated = await self.db.get_lockout_data(self.username)
-            if updated["failed_attempts"] >= 6:
-                raise HTTPException(status_code=403, detail="Recovery PIN required.")
+            lo2 = await self.db.get_lockout_data(self.username)
+            if lo2["failed_attempts"] >= 5:
+                # 6th+ wrong: must supply a good PIN
+                if not recovery_pin or not await self.verify_recovery_pin(recovery_pin):
+                    await self.inc_pin_failure()
+                    raise HTTPException(status_code=403, detail="Invalid recovery PIN.")
+                else:
+                    await self.inc_login_failure()
+                    raise HTTPException(status_code=401, detail="Invalid credentials.")
             else:
+                # Under 5 failures: just count it
+                await self.inc_login_failure()
                 raise HTTPException(status_code=401, detail="Invalid credentials.")
 
-        # 4) If you’ve already failed ≥5 times, force a PIN check
-        if lo["failed_attempts"] >= 5:
-            if not recovery_pin or not await self.verify_recovery_pin(recovery_pin):
-                # Wrong or missing PIN → increment failure & enforce lockout
-                await self.inc_login_failure()
-                raise HTTPException(status_code=403, detail="Invalid recovery PIN.")
-            # PIN correct → clear failures and continue
-            await self.db.reset_lockout_data(self.username)
-
-        # 5) (Optional) TOTP
+        # 4) (Optional) TOTP on correct password
         totp_secret = await self.db.get_totp_secret(self.username)
         if totp_secret:
             if not totp_code or not pyotp.TOTP(totp_secret).verify(totp_code):
                 raise HTTPException(status_code=403, detail="Invalid or missing TOTP code.")
 
-        # 6) All checks passed → reset everything
+        # 5) All checks passed → reset failure count & lockout
         await self.db.reset_lockout_data(self.username)
 
-        # 7) Re-derive Fernet key
+        # 6) Re-derive Fernet key...
         salt_hex = (
             await self.db.execute_with_retry(
                 "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
@@ -290,10 +286,16 @@ class DynamicPasswordManager:
         return True
 
     async def inc_login_failure(self):
+        # Just bump the failure counter; no lockout on wrong-password
         lock = await self.db.get_lockout_data(self.username)
         fa = lock['failed_attempts'] + 1
-        until = int(time.time()) + (3 * (2 ** (fa - 5)) * 60 if fa >= 5 else 0)
-        await self.db.set_lockout_data(self.username, fa, until)
+        await self.db.set_lockout_data(self.username, fa, lock['lockout_until'])
+    
+    async def inc_pin_failure(self):
+        # On bad/missing PIN, impose a fixed 5-minute lockout
+        lock = await self.db.get_lockout_data(self.username)
+        until = int(time.time()) + 5 * 60
+        await self.db.set_lockout_data(self.username, lock['failed_attempts'], until)
 
     async def enable_2fa(self):
         totp_secret = pyotp.random_base32()
