@@ -209,29 +209,54 @@ class DynamicPasswordManager:
         self.fer = Fernet(base64.urlsafe_b64encode(kdf))
         return {"message": "Account created successfully."}
 
-    async def verify_master_password(self, master_password: str, totp_code: Optional[str] = None):
-        lock = await self.db.get_lockout_data(self.username)
-        if time.time() < lock['lockout_until']:
-            raise HTTPException(status_code=403, detail="User locked out")
+    async def verify_master_password(
+        self,
+        master_password: str,
+        totp_code: Optional[str] = None,
+        recovery_pin: Optional[str] = None,
+    ) -> bool:
+        # 1) Lockout timer check
+        lo = await self.db.get_lockout_data(self.username)
+        now = int(time.time())
+        if now < lo["lockout_until"]:
+            remaining = lo["lockout_until"] - now
+            raise HTTPException(403, f"User locked out. Try again in {remaining}s")
 
-        result = await self.db.execute_with_retry(
-            "SELECT pass FROM users WHERE uname = ?", [self.username]
-        )
-        if not result.rows:
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-
-        try:
-            self.ph.verify(result.rows[0][0], master_password)
-        except VerifyMismatchError:
+        # 2) Fetch stored hash
+        stored = await self.db.get_user_password(self.username)
+        if not stored:
+            # no such user
             await self.inc_login_failure()
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise HTTPException(401, "Invalid credentials")
 
-        totp_secret = await self.db.get_totp_secret(self.username)
-        if totp_secret:
-            if not totp_code or not pyotp.TOTP(totp_secret).verify(totp_code):
-                raise HTTPException(status_code=403, detail="Invalid TOTP code")
+        # 3) Check password
+        try:
+            self.ph.verify(stored, master_password)
+        except VerifyMismatchError:
+            # wrong password → increment
+            fa = lo["failed_attempts"] + 1
+            await self.db.set_lockout_data(self.username, fa, now)
+            # if they've now failed 6+ times, require PIN
+            if fa >= 6:
+                raise HTTPException(403, "Recovery PIN required")
+            else:
+                raise HTTPException(401, "Invalid master password")
 
+        # 4) Password is correct, but have they already failed ≥5 times?
+        if lo["failed_attempts"] >= 5:
+            # force a PIN check
+            if not recovery_pin or not await self.verify_recovery_pin(recovery_pin):
+                raise HTTPException(403, "Recovery PIN required")
+
+        # 5) (Optional) TOTP check if you still want it
+        if await self.db.get_totp_secret(self.username):
+            if not totp_code or not pyotp.TOTP(await self.db.get_totp_secret(self.username)).verify(totp_code):
+                raise HTTPException(403, "Invalid or missing TOTP code")
+
+        # 6) Success → reset lockout counters
         await self.db.reset_lockout_data(self.username)
+
+        # 7) Derive Fernet key from salt & password
         salt_hex = (await self.db.execute_with_retry(
             "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
         )).rows[0][0]
@@ -246,6 +271,7 @@ class DynamicPasswordManager:
             type=Type.ID
         )
         self.fer = Fernet(base64.urlsafe_b64encode(kdf))
+
         return True
 
     async def inc_login_failure(self):
@@ -400,6 +426,7 @@ class LoginRequest(BaseModel):
     username: str
     master_password: str
     totp_code: Optional[str] = None
+    recovery_pin: Optional[str] = None
 
 class CredentialsRequest(BaseModel):
     username: str
@@ -493,11 +520,22 @@ async def register(req: RegisterRequest):
 
 @app.post("/login")
 async def login(req: LoginRequest):
-    mgr = DynamicPasswordManager(req.username)
-    if await mgr.verify_master_password(req.master_password, req.totp_code):
-        sessions[req.username] = {"manager": mgr, "master_password": req.master_password}
-        return {"message": "Login successful"}
-    raise HTTPException(status_code=401, detail="Invalid credentials or TOTP code")
+    manager = DynamicPasswordManager(req.username)
+    try:
+        ok = await manager.verify_master_password(
+            req.master_password,
+            req.totp_code,
+            req.recovery_pin,
+        )
+        if ok:
+            sessions[req.username] = {
+                "manager": manager,
+                "master_password": req.master_password
+            }
+            return {"message": "Login successful"}
+    finally:
+        if req.username not in sessions:
+            await manager.db.close()
 
 @app.post("/get_all_sites")
 async def get_all_sites(req: GetAllSitesRequest):
