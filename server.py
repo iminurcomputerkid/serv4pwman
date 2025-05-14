@@ -228,9 +228,7 @@ class DynamicPasswordManager:
         now = int(time.time())
 
         # ── A) if they’ve already passed the PIN, skip lockout checks
-        if lo['pin_verified']:
-            pass
-        else:
+        if not lo['pin_verified']:
             # still enforce any active lockout
             if now < lo['lockout_until']:
                 rem = lo['lockout_until'] - now
@@ -247,24 +245,26 @@ class DynamicPasswordManager:
         except VerifyMismatchError:
             fa = lo['failed_attempts'] + 1
 
-            # if they already passed PIN, or still under 6th fail → just count it
+            # under 6th fail or PIN already good → just count it
             if lo['pin_verified'] or fa <= 5:
-                await self.db.set_lockout_data(self.username, fa, lo['lockout_until'], lo['pin_verified'])
+                await self.db.set_lockout_data(
+                    self.username, fa, lo['lockout_until'], lo['pin_verified']
+                )
                 raise HTTPException(401, "Invalid credentials.")
 
-            # 6th+ fail & PIN not yet passed → need PIN
+            # on 6th+ fail & PIN not yet good → demand PIN
             if not recovery_pin:
-                # prompt for PIN (clear lockout so they can re-enter PIN+password)
+                # clear any temporary lockout so they can retry PIN+pw
                 await self.db.set_lockout_data(self.username, fa, 0, False)
                 raise HTTPException(403, "Recovery PIN required.")
             if await self.verify_recovery_pin(recovery_pin):
-                # correct PIN → record this failure, clear lockout, mark PIN passed
+                # good PIN → bump failure, clear lockout, mark PIN passed
                 await self.db.set_lockout_data(self.username, fa, 0, True)
                 raise HTTPException(401, "Invalid credentials.")
             else:
-                # wrong PIN → lock them for 5 more minutes
+                # bad PIN → extend lockout 5m
                 await self.db.set_lockout_data(
-                    self.username, fa, now + 5*60, False
+                    self.username, fa, now + 5 * 60, False
                 )
                 raise HTTPException(403, "Invalid recovery PIN.")
 
@@ -276,7 +276,24 @@ class DynamicPasswordManager:
         # ── D) fully authenticated → reset all lockout state
         await self.db.reset_lockout_data(self.username)
 
-        # …then derive your Fernet key as before…
+        # ── E) **derive your Fernet key** so self.fer is no longer None
+        salt_hex = (
+            await self.db.execute_with_retry(
+                "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
+            )
+        ).rows[0][0]
+        salt = bytes.fromhex(salt_hex)
+        kdf = hash_secret_raw(
+            secret=master_password.encode(),
+            salt=salt,
+            time_cost=2,
+            memory_cost=102400,
+            parallelism=8,
+            hash_len=32,
+            type=Type.ID
+        )
+        self.fer = Fernet(base64.urlsafe_b64encode(kdf))
+
         return True
 
     async def inc_login_failure(self):
