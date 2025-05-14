@@ -292,7 +292,7 @@ class DynamicPasswordManager:
 
     async def delete_all_data(self, pin: str):
         if not await self.verify_recovery_pin(pin):
-            raise HTTPException(status_code=401, detail="Invalid recovery PIN")
+            raise HTTPException(status_code=401, detail="Invalid PIN")
         await self.db.delete_user_data(self.username)
         return {"message": "All data permanently deleted."}
 
@@ -334,6 +334,7 @@ class DynamicPasswordManager:
         return {"message": "Wallet added successfully."}
 
     async def get_wallet(self, wallet, master_password, pin):
+        await self.verify_master_password(master_password)
         if not await self.verify_recovery_pin(pin):
             raise HTTPException(status_code=401, detail="Invalid PIN")
         cred = await self.db.get_wallet(self.username, wallet)
@@ -342,7 +343,11 @@ class DynamicPasswordManager:
         du = self.fer.decrypt(cred[0].encode()).decode() if cred[0] else ""
         dp = self.fer.decrypt(cred[1].encode()).decode() if cred[1] else ""
         dr = self.fer.decrypt(cred[2].encode()).decode() if cred[2] else ""
-        return {"username": du or "No username", "password": dp or "No password", "recovery_phrase": dr or "No recovery phrase"}
+        return {
+            "username": du or "No username",
+            "password": dp or "No password",
+            "recovery_phrase": dr or "No recovery phrase"
+        }
 
     async def add_secure_doc(self, name, contents):
         ec = self.fer.encrypt(contents.encode()).decode()
