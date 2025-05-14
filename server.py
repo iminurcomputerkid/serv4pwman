@@ -119,6 +119,13 @@ class DatabaseConnector:
             [username]
         )
         return result.rows[0][0] if result.rows else None
+    
+    async def get_user_password(self, username: str) -> Optional[str]:
+        result = await self.execute_with_retry(
+            "SELECT pass FROM users WHERE uname = ?",
+            [username]
+        )
+        return result.rows[0][0] if result.rows else None
 
     async def get_all_wallets(self, username):
         result = await self.execute_with_retry(
