@@ -413,6 +413,10 @@ class GetCredentialsRequest(BaseModel):
     master_password: str
     site: str
 
+class Disable2FARequest(BaseModel):
+    username: str
+    pin: str
+
 class WalletRequest(BaseModel):
     username: str
     master_password: str
@@ -565,10 +569,14 @@ async def enable_2fa(req: TwoFARequest):
     return await sessions[req.username]["manager"].enable_2fa()
 
 @app.post("/disable_2fa")
-async def disable_2fa(req: TwoFARequest):
+async def disable_2fa(req: Disable2FARequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].disable_2fa()
+    manager = sessions[req.username]["manager"]
+    #verify the recovery PIN before disabling 2FA
+    if not await manager.verify_recovery_pin(req.pin):
+        raise HTTPException(status_code=401, detail="Invalid recovery PIN")
+    return await manager.disable_2fa()
 
 @app.post("/delete_all_data")
 async def delete_all_data(req: DeleteDataRequest):
