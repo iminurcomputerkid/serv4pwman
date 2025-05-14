@@ -222,55 +222,53 @@ class DynamicPasswordManager:
         totp_code: Optional[str] = None,
         recovery_pin: Optional[str] = None,
     ) -> bool:
-        # 1) Check current lockout
+        # 1) Enforce any existing lockout
         lo = await self.db.get_lockout_data(self.username)
         now = int(time.time())
         if now < lo["lockout_until"]:
-            remaining = lo["lockout_until"] - now
-            raise HTTPException(
-                status_code=403,
-                detail=f"User locked out. Try again in {remaining} seconds."
-            )
+            rem = lo["lockout_until"] - now
+            raise HTTPException(403, f"User locked out. Try again in {rem} seconds.")
 
-        # 2) Fetch stored password hash
+        # 2) Load stored hash
         stored = await self.db.get_user_password(self.username)
         if not stored:
             await self.inc_login_failure()
-            raise HTTPException(status_code=401, detail="Invalid credentials.")
+            raise HTTPException(401, "Invalid credentials.")
 
-        # 3) Verify password
+        # 3) Check password
         try:
             self.ph.verify(stored, master_password)
         except VerifyMismatchError:
             lo2 = await self.db.get_lockout_data(self.username)
             if lo2["failed_attempts"] >= 5:
-                # 6th+ wrong: must supply a good PIN
+                # On 6th+ wrong password, PIN is required
                 if not recovery_pin or not await self.verify_recovery_pin(recovery_pin):
+                    # wrong or missing PIN → lock out
                     await self.inc_pin_failure()
-                    raise HTTPException(status_code=403, detail="Invalid recovery PIN.")
+                    raise HTTPException(403, "Invalid recovery PIN.")
                 else:
-                    await self.inc_login_failure()
-                    raise HTTPException(status_code=401, detail="Invalid credentials.")
+                    # correct PIN → count the pwd-fail, clear any lockout
+                    new_fa = lo2["failed_attempts"] + 1
+                    await self.db.set_lockout_data(self.username, new_fa, 0)
+                    raise HTTPException(401, "Invalid credentials.")
             else:
-                # Under 5 failures: just count it
+                # under 5 fails: just count it
                 await self.inc_login_failure()
-                raise HTTPException(status_code=401, detail="Invalid credentials.")
+                raise HTTPException(401, "Invalid credentials.")
 
-        # 4) (Optional) TOTP on correct password
+        # 4) (Optional) TOTP
         totp_secret = await self.db.get_totp_secret(self.username)
         if totp_secret:
             if not totp_code or not pyotp.TOTP(totp_secret).verify(totp_code):
-                raise HTTPException(status_code=403, detail="Invalid or missing TOTP code.")
+                raise HTTPException(403, "Invalid or missing TOTP code.")
 
-        # 5) All checks passed → reset failure count & lockout
+        # 5) Success! reset everything
         await self.db.reset_lockout_data(self.username)
 
-        # 6) Re-derive Fernet key...
-        salt_hex = (
-            await self.db.execute_with_retry(
-                "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
-            )
-        ).rows[0][0]
+        # 6) Derive Fernet key...
+        salt_hex = (await self.db.execute_with_retry(
+            "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
+        )).rows[0][0]
         salt = bytes.fromhex(salt_hex)
         kdf = hash_secret_raw(
             secret=master_password.encode(),
@@ -282,7 +280,6 @@ class DynamicPasswordManager:
             type=Type.ID
         )
         self.fer = Fernet(base64.urlsafe_b64encode(kdf))
-
         return True
 
     async def inc_login_failure(self):
@@ -294,8 +291,9 @@ class DynamicPasswordManager:
     async def inc_pin_failure(self):
         # On bad/missing PIN, impose a fixed 5-minute lockout
         lock = await self.db.get_lockout_data(self.username)
-        until = int(time.time()) + 5 * 60
-        await self.db.set_lockout_data(self.username, lock['failed_attempts'], until)
+        now = int(time.time())
+        until = max(lock['lockout_until'], now) + 5 * 60
+        await self.db.set_lockout_data(self.username, lock['failed_attempts'], int(until))
 
     async def enable_2fa(self):
         totp_secret = pyotp.random_base32()
