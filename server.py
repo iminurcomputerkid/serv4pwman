@@ -222,59 +222,59 @@ class DynamicPasswordManager:
         totp_code: Optional[str] = None,
         recovery_pin: Optional[str] = None,
     ) -> bool:
+        # 1) Check current lockout
         lo = await self.db.get_lockout_data(self.username)
         now = int(time.time())
-
-        # 1) Are we still locked out?
         if now < lo["lockout_until"]:
             remaining = lo["lockout_until"] - now
-            raise HTTPException(403, f"User locked out. Try again in {remaining}s")
+            raise HTTPException(
+                status_code=403,
+                detail=f"User locked out. Try again in {remaining} seconds."
+            )
 
         # 2) Fetch stored password hash
-        stored_hash = await self.db.get_user_password(self.username)
-        if not stored_hash:
-            # no such user
+        stored = await self.db.get_user_password(self.username)
+        if not stored:
+            # Unknown user → increment failure
             await self.inc_login_failure()
-            raise HTTPException(401, "Invalid username or password")
+            raise HTTPException(status_code=401, detail="Invalid credentials.")
 
-        # 3) Check password
+        # 3) Verify password
         try:
-            self.ph.verify(stored_hash, master_password)
+            self.ph.verify(stored, master_password)
         except VerifyMismatchError:
-            # wrong password → track one more failure
+            # Wrong password → increment and possibly require PIN
             await self.inc_login_failure()
-            lo = await self.db.get_lockout_data(self.username)  # re-fetch
-            # if we’ve just hit 6th failure, force PIN
-            if lo["failed_attempts"] >= 6:
-                raise HTTPException(403, "Recovery PIN required")
+            updated = await self.db.get_lockout_data(self.username)
+            if updated["failed_attempts"] >= 6:
+                raise HTTPException(status_code=403, detail="Recovery PIN required.")
             else:
-                raise HTTPException(401, "Invalid username or password")
+                raise HTTPException(status_code=401, detail="Invalid credentials.")
 
-        # 4) If we’ve already had 5+ failures, force PIN now
+        # 4) If you’ve already failed ≥5 times, force a PIN check
         if lo["failed_attempts"] >= 5:
-            if not recovery_pin:
-                raise HTTPException(403, "Recovery PIN required")
-            # bad PIN → 5-minute penalty
-            if not await self.verify_recovery_pin(recovery_pin):
-                penalty = 5 * 60
-                await self.db.set_lockout_data(self.username, lo["failed_attempts"], now + penalty)
-                raise HTTPException(403, "Recovery PIN required")
-            # correct PIN → wipe out the lockout timer (but keep failed_attempts count if you like)
+            if not recovery_pin or not await self.verify_recovery_pin(recovery_pin):
+                # Wrong or missing PIN → increment failure & enforce lockout
+                await self.inc_login_failure()
+                raise HTTPException(status_code=403, detail="Invalid recovery PIN.")
+            # PIN correct → clear failures and continue
             await self.db.reset_lockout_data(self.username)
 
-        # 5) (optional) TOTP check
+        # 5) (Optional) TOTP
         totp_secret = await self.db.get_totp_secret(self.username)
         if totp_secret:
             if not totp_code or not pyotp.TOTP(totp_secret).verify(totp_code):
-                raise HTTPException(403, "Invalid or missing TOTP code")
+                raise HTTPException(status_code=403, detail="Invalid or missing TOTP code.")
 
-        # 6) Finally, on a completely clean login, clear any previous lockout
+        # 6) All checks passed → reset everything
         await self.db.reset_lockout_data(self.username)
 
-        # 7) Derive your Fernet key
-        salt_hex = (await self.db.execute_with_retry(
-            "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
-        )).rows[0][0]
+        # 7) Re-derive Fernet key
+        salt_hex = (
+            await self.db.execute_with_retry(
+                "SELECT salt_phrase FROM users WHERE uname = ?", [self.username]
+            )
+        ).rows[0][0]
         salt = bytes.fromhex(salt_hex)
         kdf = hash_secret_raw(
             secret=master_password.encode(),
