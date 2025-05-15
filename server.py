@@ -6,7 +6,7 @@ import string
 import time
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, applications
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet
@@ -17,6 +17,7 @@ import pyotp
 import pyqrcode
 from aiohttp import ClientError
 from libsql_client import create_client
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -450,6 +451,15 @@ class DynamicPasswordManager:
 
 # ----- FastAPI Application Setup -----
 app = FastAPI(title="SecureASF API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 sessions = {}
 
 # Pydantic models
