@@ -368,11 +368,15 @@ class DynamicPasswordManager:
         await self.db.delete_user_data(self.username)
         return {"message": "All data permanently deleted."}
 
-    async def delete_credentials(self, site: str):
+    async def delete_credentials(self, site: str, pin: str):
+        if not await self.verify_recovery_pin(pin):
+            raise HTTPException(status_code=401, detail="Invalid PIN")
         await self.db.delete_site(self.username, site)
         return {"message": "Credentials deleted successfully."}
 
-    async def delete_wallet(self, wallet: str):
+    async def delete_wallet(self, wallet: str, pin: str):
+        if not await self.verify_recovery_pin(pin):
+            raise HTTPException(status_code=401, detail="Invalid PIN")
         await self.db.delete_wallet(self.username, wallet)
         return {"message": "Wallet deleted successfully."}
 
@@ -444,7 +448,9 @@ class DynamicPasswordManager:
         await self.db.update_doc(self.username, name, ec)
         return {"message": "Document updated successfully."}
 
-    async def delete_secure_doc(self, name):
+    async def delete_secure_doc(self, name: str, pin: str):
+        if not await self.verify_recovery_pin(pin):
+            raise HTTPException(status_code=401, detail="Invalid PIN")
         await self.db.delete_doc(self.username, name)
         return {"message": "Document deleted successfully."}
 
@@ -520,10 +526,12 @@ class DeleteDataRequest(BaseModel):
 class DeleteCredentialsRequest(BaseModel):
     username: str
     site: str
+    pin: str
 
 class DeleteWalletRequest(BaseModel):
     username: str
     wallet_name: str
+    pin: str
 
 class SecureDocAddRequest(BaseModel):
     username: str
@@ -545,6 +553,7 @@ class UpdateSecureDocRequest(BaseModel):
 class DeleteDocRequest(BaseModel):
     username: str
     doc_name: str
+    pin: str
 
 class TwoFARequest(BaseModel):
     username: str
@@ -608,7 +617,7 @@ async def get_credentials(req: GetCredentialsRequest):
 async def delete_credentials(req: DeleteCredentialsRequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].delete_credentials(req.site)
+    return await sessions[req.username]["manager"].delete_credentials(req.site, req.pin)
 
 @app.post("/get_all_wallets")
 async def get_all_wallets(req: GetAllWalletsRequest):
@@ -635,7 +644,7 @@ async def get_wallet(req: GetWalletRequest):
 async def delete_wallet(req: DeleteWalletRequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].delete_wallet(req.wallet_name)
+    return await sessions[req.username]["manager"].delete_wallet(req.wallet_name, req.pin)
 
 @app.post("/reset_master_password")
 async def reset_master_password(req: ResetMasterPasswordRequest):
@@ -698,7 +707,7 @@ async def update_secure_doc(req: UpdateSecureDocRequest):
 async def delete_secure_doc(req: DeleteDocRequest):
     if req.username not in sessions:
         raise HTTPException(status_code=401, detail="User not logged in")
-    return await sessions[req.username]["manager"].delete_secure_doc(req.doc_name)
+    return await sessions[req.username]["manager"].delete_secure_doc(req.doc_name, req.pin)
 
 if __name__ == "__main__":
     import uvicorn
